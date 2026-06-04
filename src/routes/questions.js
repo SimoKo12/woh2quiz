@@ -5,28 +5,65 @@ const authenticate = require("../middleware/auth");
 const isOwner = require("../middleware/isOwner");
 const { NotFoundError, ValidationError } = require("../lib/errors");
 const { z } = require("zod");
+const multer = require("multer");
+const path = require("path");
 
-// Zod validation
+// Zod
 const QuestionInput = z.object({
   text: z.string().min(1),
   answer: z.string()
 });
 
-// FormatQuestion function
+// Multer config
+const storage = multer.diskStorage({
+  destination: path.join(__dirname, "..", "..", "public", "uploads"),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    const newName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+    cb(null, newName);
+  }
+});
+
+const upload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith("image")) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only images allowed"));
+    }
+  },
+  limits: { fileSize: 5 * 1024 * 1024 }
+});
+
+// Format function
 function formatQuestion(question) {
+  const attempts = question.attempts || [];
+
+  const attemptsCount = attempts.length;
+  const correctCount = attempts.filter(a => a.correct).length;
+  const solved = correctCount > 0;
+
   return {
     id: question.id,
     text: question.text,
     answer: question.answer,
-    userName: question.user?.name || null
+    image: question.image ? `/uploads/${question.image}` : null,
+    userName: question.user?.name || null,
+    attemptsCount,
+    correctCount,
+    solved
   };
 }
 
-// GET /api question
+// GET /api/questions
 router.get("/", async (req, res, next) => {
   try {
     const questions = await prisma.question.findMany({
-      include: { user: true },
+      include: {
+        user: true,
+        attempts: true
+      },
       orderBy: { id: "asc" }
     });
 
@@ -36,7 +73,7 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// GET /api question id
+// GET /api/questions/:id
 router.get("/:id", async (req, res, next) => {
   try {
     const id = Number(req.params.id);
@@ -47,7 +84,10 @@ router.get("/:id", async (req, res, next) => {
 
     const question = await prisma.question.findUnique({
       where: { id },
-      include: { user: true }
+      include: {
+        user: true,
+        attempts: true
+      }
     });
 
     if (!question) {
@@ -60,8 +100,8 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
-// POST /api question
-router.post("/", authenticate, async (req, res, next) => {
+// POST /api/questions
+router.post("/", authenticate, upload.single("image"), async (req, res, next) => {
   try {
     const { text, answer } = QuestionInput.parse(req.body);
 
@@ -69,9 +109,13 @@ router.post("/", authenticate, async (req, res, next) => {
       data: {
         text,
         answer,
+        image: req.file ? req.file.filename : null,
         userId: req.user.id
       },
-      include: { user: true }
+      include: {
+        user: true,
+        attempts: true
+      }
     });
 
     res.status(201).json(formatQuestion(newQuestion));
@@ -80,8 +124,8 @@ router.post("/", authenticate, async (req, res, next) => {
   }
 });
 
-// PUT /api id
-router.put("/:id", authenticate, isOwner, async (req, res, next) => {
+// PUT /api/questions/:id
+router.put("/:id", authenticate, isOwner, upload.single("image"), async (req, res, next) => {
   try {
     const id = Number(req.params.id);
 
@@ -93,8 +137,15 @@ router.put("/:id", authenticate, isOwner, async (req, res, next) => {
 
     const updated = await prisma.question.update({
       where: { id },
-      data: { text, answer },
-      include: { user: true }
+      data: {
+        text,
+        answer,
+        image: req.file ? req.file.filename : undefined
+      },
+      include: {
+        user: true,
+        attempts: true
+      }
     });
 
     res.json(formatQuestion(updated));
@@ -103,7 +154,7 @@ router.put("/:id", authenticate, isOwner, async (req, res, next) => {
   }
 });
 
-// DELETE /api id
+// DELETE /api/questions/:id
 router.delete("/:id", authenticate, isOwner, async (req, res, next) => {
   try {
     const id = Number(req.params.id);
